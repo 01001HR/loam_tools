@@ -1,0 +1,11 @@
+<launch>
+  <arg name="calibration_file" default="$(find loam_tools)/config/calib_sep5_quad.yaml"/>
+
+  <!-- convert loam local map to depth image -->
+  <node name="map_to_depth" pkg="loam_tools"	type="map_to_depth_node" output="screen">
+    <rosparam command="load" file="$(arg calibration_file)"/>
+    <param name="num_maps_to_keep" type="int" value="1"/>
+    <remap from="~pointcloud" to="/lidar_mapping_nodelet/local_map"/>
+    <remap from="~pose" to="/lidar_mapping_nodelet/pose"/>
+  </node>
+</launch>
