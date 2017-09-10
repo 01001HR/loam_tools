@@ -7,5 +7,6 @@
     <param name="num_maps_to_keep" type="int" value="1"/>
     <remap from="~pointcloud" to="/lidar_mapping_nodelet/local_map"/>
     <remap from="~pose" to="/lidar_mapping_nodelet/pose"/>
+    <remap from="~sweep" to="/lidar_mapping_nodelet/sweep"/>
   </node>
 </launch>

@@ -39,6 +39,18 @@ namespace loam_tools {
   using geometry_msgs::PoseWithCovarianceStamped;
   using geometry_msgs::PoseWithCovarianceStampedConstPtr;
 
+  typedef Eigen::Affine3f Transform;
+  
+  struct CloudListItem {
+    CloudListItem(pcl::PointCloud<pcl::PointXYZ>::Ptr cl = pcl::PointCloud<pcl::PointXYZ>::Ptr(),
+                  const Transform &p = Transform()) : cloud(cl), pose(p) {
+    };
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+    Transform                           pose; // T_world_lidar
+  };
+  typedef std::list<CloudListItem> CloudList;
+  typedef CloudList::const_iterator CloudListConstIt;
+
   class MapToDepth {
   public:
     MapToDepth(const ros::NodeHandle &pnh);
@@ -50,6 +62,8 @@ namespace loam_tools {
     bool initialize();
     void pointCloudCallback(const PointCloud2ConstPtr &msg,
                             const PoseWithCovarianceStampedConstPtr &pose);
+    void laserScanCallback(const PointCloud2ConstPtr &msg,
+                           const PoseWithCovarianceStampedConstPtr &pose);
     void leftImageCallback(const sensor_msgs::ImageConstPtr &msg);
     void rightImageCallback(const sensor_msgs::ImageConstPtr &msg);
 
@@ -63,15 +77,20 @@ namespace loam_tools {
     ros::NodeHandle                                         nh_;
     image_transport::ImageTransport                         imTrans_;
     std::shared_ptr<Subscriber<PointCloud2> >               pointCloudSub_;
+    std::shared_ptr<Subscriber<PointCloud2> >               laserScanSub_;
     std::shared_ptr<Subscriber<PoseWithCovarianceStamped> > poseSub_;
 
     typedef ApproximateTime<PointCloud2, PoseWithCovarianceStamped> ApproxPolicy;
  
     std::shared_ptr<Synchronizer<ApproxPolicy> > pointCloudSync_;
+    std::shared_ptr<Synchronizer<ApproxPolicy> > laserScanSync_;
 
     image_transport::Subscriber     imSub_[2];
-    image_transport::Publisher      imPub_[2];
+    image_transport::Publisher      imPubFromMap_[2];
+    image_transport::Publisher      imPubFromScan_[2];
     Camera                          cam_[2];
+
+    CloudList                       cloudList_;
     int                             numMapsToKeep_{1};  // TODO: not used yet!
   };
 }

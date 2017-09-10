@@ -9,6 +9,7 @@
 #include <sensor_msgs/PointCloud2.h>
 
 #include <pcl/point_types.h>
+#include <pcl/common/transforms.h>
 #include <pcl_ros/point_cloud.h>
 #include <pcl/conversions.h>
 #include <tf/transform_broadcaster.h>
@@ -43,16 +44,25 @@ namespace loam_tools {
   }
 
   bool MapToDepth::initialize() {
-    imPub_[0] = imTrans_.advertise("left/depth_image", 1);
-    imPub_[1] = imTrans_.advertise("right/depth_image", 1);
+    imPubFromMap_[0] = imTrans_.advertise("left/depth_image_from_map", 1);
+    imPubFromMap_[1] = imTrans_.advertise("right/depth_image_from_map", 1);
+    imPubFromScan_[0] = imTrans_.advertise("left/depth_image_from_scan", 1);
+    imPubFromScan_[1] = imTrans_.advertise("right/depth_image_from_scan", 1);
+    
     //TODO: use camera image and publish colored pointcloud
     //imSub_[0] = imTrans_.subscribe("left/image", 1, &MapToDepth::leftImageCallback, this);
     //imSub_[1] = imTrans_.subscribe("right/image", 1, &MapToDepth::rightImageCallback, this);
 
-    poseSub_.reset(new Subscriber<PoseWithCovarianceStamped>(nh_, "pose", 1));
-    pointCloudSub_.reset(new Subscriber<PointCloud2>(nh_, "pointcloud", 1));
-    pointCloudSync_.reset(new Synchronizer<ApproxPolicy>(ApproxPolicy(10), *pointCloudSub_, *poseSub_));
-    pointCloudSync_->registerCallback(boost::bind(&MapToDepth::pointCloudCallback, this, _1, _2));
+    poseSub_.reset(new Subscriber<PoseWithCovarianceStamped>(nh_, "pose", 0));
+    
+    //pointCloudSub_.reset(new Subscriber<PointCloud2>(nh_, "pointcloud", 0));
+    //pointCloudSync_.reset(new Synchronizer<ApproxPolicy>(ApproxPolicy(10), *pointCloudSub_, *poseSub_));
+    //pointCloudSync_->registerCallback(boost::bind(&MapToDepth::pointCloudCallback, this, _1, _2));
+    
+    laserScanSub_.reset(new Subscriber<PointCloud2>(nh_, "sweep", 0));
+    laserScanSync_.reset(new Synchronizer<ApproxPolicy>(ApproxPolicy(10), *laserScanSub_, *poseSub_));
+    laserScanSync_->registerCallback(boost::bind(&MapToDepth::laserScanCallback, this, _1, _2));
+    
 
     numMapsToKeep_ = get_param(&nh_, "num_maps_to_keep", int(1));
     getCameraCalibration();
@@ -134,25 +144,53 @@ namespace loam_tools {
 
   void MapToDepth::processImage(const sensor_msgs::ImageConstPtr &msg, int camId) {
   }
-  
-  void MapToDepth::pointCloudCallback(const PointCloud2ConstPtr &msg,
-                                      const PoseWithCovarianceStampedConstPtr &pmsg) {
+
+  static tf::Transform poseToTF(const PoseWithCovarianceStampedConstPtr &pmsg) {
     tf::Transform tf;
     const geometry_msgs::Point &pos = pmsg->pose.pose.position;
     const geometry_msgs::Quaternion &q = pmsg->pose.pose.orientation;
     tf.setOrigin(tf::Vector3(pos.x, pos.y, pos.z));
     tf.setRotation(tf::Quaternion(q.x, q.y, q.z, q.w));
-    tf = tf.inverse();
-    
+    return (tf);
+  }
+
+  static Transform poseToTransform(const PoseWithCovarianceStampedConstPtr &pmsg) {
+    const geometry_msgs::Point      &pos = pmsg->pose.pose.position;
+    const geometry_msgs::Quaternion   &q = pmsg->pose.pose.orientation;
+    Eigen::Matrix3f mat3 = Eigen::Quaternionf(q.w, q.x, q.y, q.z).toRotationMatrix();
+    Eigen::Matrix4f mat4 = Eigen::Matrix4f::Identity();
+    mat4.block(0, 0, 3, 3) = mat3;
+    mat4.block(0, 3, 3, 1) = Eigen::Vector3f(pos.x, pos.y, pos.z);
+    Transform tf4(mat4);
+    return (tf4);
+  }
+  
+  void MapToDepth::pointCloudCallback(const PointCloud2ConstPtr &msg,
+                                      const PoseWithCovarianceStampedConstPtr &pmsg) {
+    //tf::Transform tf = poseToTF(pmsg).inverse();
+ 
     pcl::PointCloud<pcl::PointXYZ> cloud;
     pcl::fromROSMsg(*msg, cloud);
     std::vector<cv::Point3f> p3d_lidar(cloud.points.size());
+#if 0    
     for (unsigned int i = 0; i < cloud.points.size(); i++) {
       const pcl::PointXYZ &p = cloud.points[i];
       // transform from global to lidar frame
       tf::Vector3 p_l = tf(tf::Vector3(p.x, p.y, p.z));
       p3d_lidar[i] = cv::Point3f(p_l.getX(), p_l.getY(), p_l.getZ());
     }
+#else
+    Transform T_w_lidar = poseToTransform(pmsg);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr transformedCloud(new pcl::PointCloud<pcl::PointXYZ>());
+    pcl::transformPointCloud(cloud, *transformedCloud, T_w_lidar.inverse());
+
+    for (unsigned int i = 0; i < cloud.points.size(); i++) {
+      const pcl::PointXYZ &p = cloud.points[i];
+      // transform from global to lidar frame
+      tf::Vector3 p_l(p.x, p.y, p.z);
+      p3d_lidar[i] = cv::Point3f(p_l.getX(), p_l.getY(), p_l.getZ());
+    }
+#endif
     ROS_INFO_STREAM("got pointcloud of size " << p3d_lidar.size());
 
     double NaNf = std::numeric_limits<float>::quiet_NaN();
@@ -175,8 +213,76 @@ namespace loam_tools {
           }
         }
       }
-      imPub_[camid].publish(cv_bridge::CvImage(msg->header, "32FC1",
+      imPubFromMap_[camid].publish(cv_bridge::CvImage(msg->header, "32FC1",
                                                img).toImageMsg());
+    }
+  }
+
+  static int stitchPointClouds(pcl::PointCloud<pcl::PointXYZ>::Ptr stitchedCloud,
+                               const CloudListConstIt &begin,
+                               const CloudListConstIt &current,
+                               const CloudListConstIt &end) {
+    Transform currPoseInverse = current->pose.inverse();
+    int numStitched(0);
+    for (CloudListConstIt it = begin; it != end; ++it) {
+      Transform relativePose = currPoseInverse * it->pose;
+      pcl::PointCloud<pcl::PointXYZ>::Ptr transformedCloud(new pcl::PointCloud<pcl::PointXYZ>());
+      pcl::transformPointCloud(*(it->cloud), *transformedCloud, relativePose);
+      // insert transformed into stitched
+      (*stitchedCloud) += *transformedCloud;
+      numStitched++;
+    }
+    return (numStitched);
+  }
+
+  //
+  // project point cloud from laser frame to camera frame
+  //
+  static void project3dToImg(cv::Mat *img, const Camera &cam, const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud) {
+    std::vector<cv::Point3f> p3(cloud->points.size());
+    // TODO: can we avoid this extra copy somehow?
+    for (unsigned int i = 0; i < cloud->points.size(); i++) {
+      const pcl::PointXYZ &p = cloud->points[i];
+      p3[i] = cv::Point3f(p.x, p.y, p.z);
+    }
+    std::vector<cv::Point2f> im(cloud->size());
+    cv::fisheye::projectPoints(p3, im, cam.T_cam_lidar, cam.K, cam.dist, /*skew*/0.0);
+    for (unsigned int i = 0; i < im.size(); i++) {
+      cv::Point2i ip = im[i]; // cast to integer
+      if (ip.x >= 0 && ip.x < cam.res[0] &&
+          ip.y >= 0 && ip.y < cam.res[1]) {
+        // point is within camera bounds
+        const cv::Point3f &p = p3[i];
+        cv::Vec<float, 4> p4d(p.x, p.y, p.z, 1.0);
+        cv::Vec<float, 4> ptrans = cam.T_cam_lidar.matrix * p4d;
+        if (ptrans(2) > 0) {
+          img->at<float>(ip.y, ip.x) = ptrans(2);
+        }
+      }
+    }
+  }
+
+  void MapToDepth::laserScanCallback(const PointCloud2ConstPtr &msg,
+                                     const PoseWithCovarianceStampedConstPtr &pmsg) {
+    Transform T_w_lidar = poseToTransform(pmsg);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
+    pcl::fromROSMsg(*msg, *cloud);
+    ROS_INFO_STREAM("got pointcloud of size " << cloud->points.size());
+    cloudList_.push_back(CloudListItem(cloud, T_w_lidar));
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr stitchedCloud(new pcl::PointCloud<pcl::PointXYZ>());
+    int numStitched = stitchPointClouds(stitchedCloud, cloudList_.begin(), cloudList_.begin(), cloudList_.end());
+    //ROS_INFO_STREAM("stitched: " << numStitched);
+    for (int camid = 0; camid < 2; camid++) {
+      const Camera &cam = cam_[camid];
+      double NaNf = std::numeric_limits<float>::quiet_NaN();
+      cv::Mat img(cam.res[1], cam.res[0], CV_32FC1, cv::Scalar(NaNf));
+      //project3dToImg(&img, cam, cloud);
+      project3dToImg(&img, cam, stitchedCloud);
+      imPubFromScan_[camid].publish(cv_bridge::CvImage(msg->header, "32FC1",
+                                                       img).toImageMsg());
+      //pcl::PointCloud<pcl::PointXYZI>::Ptr graycloud(new pcl::PointCloud<pcl::PointXYZI>());
+      //unprojectImage(pcl, grayCloud);
     }
   }
 

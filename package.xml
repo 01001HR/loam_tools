@@ -18,6 +18,8 @@
   <depend>message_filters</depend>
   <depend>opencv</depend>
   <depend>cv_bridge</depend>
+  <depend>eigen</depend>
+  <depend>eigen_conversions</depend>
   <depend>image_transport</depend>
   <depend>image_geometry</depend>
   <depend>tf</depend>
