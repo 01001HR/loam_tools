@@ -42,11 +42,16 @@ namespace loam_tools {
   typedef Eigen::Affine3f Transform;
   
   struct CloudListItem {
-    CloudListItem(pcl::PointCloud<pcl::PointXYZ>::Ptr cl = pcl::PointCloud<pcl::PointXYZ>::Ptr(),
-                  const Transform &p = Transform()) : cloud(cl), pose(p) {
+    CloudListItem(pcl::PointCloud<pcl::PointXYZI>::Ptr cl = pcl::PointCloud<pcl::PointXYZI>::Ptr(),
+                  const Transform &p = Transform(),
+                  ImageConstPtr  p0 = ImageConstPtr(),
+                  ImageConstPtr  p1 = ImageConstPtr()) : cloud(cl), pose(p) {
+      imagePtr[0] = p0;
+      imagePtr[1] = p1;
     };
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
-    Transform                           pose; // T_world_lidar
+    pcl::PointCloud<pcl::PointXYZI>::Ptr  cloud;
+    Transform                             pose; // T_world_lidar
+    ImageConstPtr                         imagePtr[2];
   };
   typedef std::list<CloudListItem> CloudList;
   typedef CloudList::const_iterator CloudListConstIt;
@@ -88,7 +93,10 @@ namespace loam_tools {
     image_transport::Subscriber     imSub_[2];
     image_transport::Publisher      imPubFromMap_[2];
     image_transport::Publisher      imPubFromScan_[2];
+    image_transport::Publisher      imPubGray_[2];
+    ros::Publisher                  grayCloudPub_[2];
     Camera                          cam_[2];
+    ImageConstPtr                   imagePtr_[2];
 
     CloudList                       cloudList_;
     int                             numMapsToKeep_{1};  // TODO: not used yet!
